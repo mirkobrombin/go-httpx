@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/mirkobrombin/go-foundation/pkg/resiliency"
@@ -18,6 +19,11 @@ type Client struct {
 
 	retryOpts []func(*resiliency.RetryOptions)
 	breaker   *resiliency.CircuitBreaker
+
+	// builtTransport caches the composed middleware chain so it is only
+	// assembled once rather than on every Do call.
+	builtTransport http.RoundTripper
+	buildOnce      sync.Once
 }
 
 // New creates a client with optional middleware.
@@ -46,37 +52,61 @@ func (c *Client) WithBreaker(b *resiliency.CircuitBreaker) *Client {
 	return c
 }
 
-func (c *Client) buildTransport() http.RoundTripper {
-	rt := c.rt
-	for i := len(c.mw) - 1; i >= 0; i-- {
-		rt = c.mw[i](rt)
-	}
-	return rt
+// transport returns the cached composed middleware chain, building it on first use.
+func (c *Client) transport() http.RoundTripper {
+	c.buildOnce.Do(func() {
+		rt := c.rt
+		for i := len(c.mw) - 1; i >= 0; i-- {
+			rt = c.mw[i](rt)
+		}
+		c.builtTransport = rt
+	})
+	return c.builtTransport
 }
 
 // Do sends a request applying middleware and optional resiliency behaviors.
+//
+// When retry options are set, requests with a body must provide req.GetBody so
+// the body can be re-read on each attempt. Requests without a body (e.g. GET)
+// are retried unconditionally.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	rt := c.buildTransport()
+	rt := c.transport()
 	var resp *http.Response
 
 	fn := func() error {
-		r, err := rt.RoundTrip(req)
+		// Clone the request and reset the body for each attempt so retries
+		// send the complete payload rather than an already-consumed reader.
+		attempt := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return err
+			}
+			attempt.Body = body
+		}
+		r, err := rt.RoundTrip(attempt)
 		resp = r
 		return err
 	}
 
+	var err error
+
 	if c.breaker != nil {
 		if len(c.retryOpts) > 0 {
-			return resp, c.breaker.Execute(func() error {
+			err = c.breaker.Execute(func() error {
 				return resiliency.Retry(req.Context(), fn, c.retryOpts...)
 			})
+		} else {
+			err = c.breaker.Execute(fn)
 		}
-		return resp, c.breaker.Execute(fn)
+		return resp, err
 	}
 
 	if len(c.retryOpts) > 0 {
-		return resp, resiliency.Retry(req.Context(), fn, c.retryOpts...)
+		err = resiliency.Retry(req.Context(), fn, c.retryOpts...)
+		return resp, err
 	}
 
-	return resp, fn()
+	err = fn()
+	return resp, err
 }
