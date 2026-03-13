@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -26,7 +27,10 @@ type Client struct {
 	buildOnce      sync.Once
 }
 
-// New creates a client with optional middleware.
+// New creates a new Client wrapping c (or a default client with 15s timeout if nil).
+// Middleware options (WithRetry, WithBreaker) must be configured before the first
+// call to Do; the transport chain is assembled once on first use and cannot be
+// modified afterward.
 func New(c *http.Client, mw ...Middleware) *Client {
 	if c == nil {
 		c = &http.Client{Timeout: 15 * time.Second}
@@ -70,6 +74,10 @@ func (c *Client) transport() http.RoundTripper {
 // the body can be re-read on each attempt. Requests without a body (e.g. GET)
 // are retried unconditionally.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if len(c.retryOpts) > 0 && req.Body != nil && req.GetBody == nil {
+		return nil, fmt.Errorf("httpx: retry requires req.GetBody to be set when request has a body")
+	}
+
 	rt := c.transport()
 	var resp *http.Response
 

@@ -181,7 +181,38 @@ func TestClientWithBreakerStopsOpenCircuit(t *testing.T) {
 	}
 }
 
-// TestTransportBuiltOnce verifies the middleware chain is assembled only once
+// TestDoRetryWithBodyRequiresGetBody verifies that Do fails fast when retry is
+// configured, the request has a body, but req.GetBody is not set. Without this
+// guard, retries would silently send an empty body after the first attempt
+// consumed the reader.
+func TestDoRetryWithBodyRequiresGetBody(t *testing.T) {
+	var calls int
+	client := httpx.New(&http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return okResponse(), nil
+	})})
+	client.WithRetry(
+		resiliency.WithAttempts(3),
+		resiliency.WithDelay(time.Nanosecond, time.Nanosecond),
+	)
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com", io.NopCloser(bytes.NewReader([]byte("payload"))))
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	// Intentionally leave req.GetBody unset.
+
+	_, err = client.Do(req)
+	if err == nil {
+		t.Fatal("Do() error = nil, want fail-fast error")
+	}
+	if !strings.Contains(err.Error(), "GetBody") {
+		t.Fatalf("Do() error = %v, want message mentioning GetBody", err)
+	}
+	if calls != 0 {
+		t.Fatalf("Do() made %d HTTP call(s), want 0", calls)
+	}
+}
 // regardless of how many times Do is called.
 func TestTransportBuiltOnce(t *testing.T) {
 	var buildCount atomic.Int32
