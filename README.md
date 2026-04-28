@@ -1,5 +1,8 @@
 # Go HTTPX
 
+> [!CAUTION]
+> go-httpx is now part of the [go-foundation](https://github.com/mirkobrombin/go-foundation) framework. The v1.0.0 release mirrors go-httpx v0.2.0, but future versions may introduce breaking changes. Please migrate your project.
+
 A small **middleware-friendly** HTTP client for Go with optional **retry** and **circuit breaker** integration.
 
 ## Features
